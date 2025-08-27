@@ -91,11 +91,14 @@ const markAsRead = async (req, res) => {
   const notifId = req.params.id;
 
   try {
-    // Support both Mongo _id and Firestore ID lookup
     let notification = null;
+
+    // Find notification by Mongo ID
     if (notifId.match(/^[0-9a-fA-F]{24}$/)) {
       notification = await Notification.findById(notifId);
     }
+
+    // If not found, try Firestore ID
     if (!notification) {
       notification = await Notification.findOne({ firestoreId: notifId });
       if (!notification) {
@@ -104,23 +107,47 @@ const markAsRead = async (req, res) => {
     }
 
     const userId = req.user.id.toString();
-    if (notification.recipientId.toString() !== userId && req.user.role !== 'admin') {
+
+    // Only check recipientId if it exists
+    if (
+      notification.recipientId &&
+      notification.recipientId.toString() !== userId &&
+      req.user.role !== 'admin'
+    ) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    notification.seen = true;
-    await notification.save();
+    // ✅ Update 'seen' in MongoDB without triggering full validation
+    const updatedNotification = await Notification.findByIdAndUpdate(
+      notification._id,
+      { $set: { seen: true } },
+      { new: true, runValidators: false } // skip required field validation
+    );
 
+    // ✅ Update Firestore if exists
     if (notification.firestoreId) {
-      await firestore.collection('notifications').doc(notification.firestoreId).update({ seen: true });
+      try {
+        await firestore
+          .collection('notifications')
+          .doc(notification.firestoreId)
+          .update({ seen: true });
+      } catch (fsErr) {
+        console.error('⚠️ Firestore update failed:', fsErr.message);
+      }
     }
 
-    res.json({ message: 'Notification marked as read in both MongoDB & Firestore' });
+    res.status(200).json({
+      message: 'Notification marked as read in both MongoDB & Firestore',
+      notification: updatedNotification,
+    });
   } catch (error) {
-    console.error('Error marking notification as read:', error);
+    console.error('❌ Error marking notification as read:', error);
     res.status(500).json({ error: 'Failed to update notification' });
   }
 };
+
+
+
 
 // Mark all notifications as read
 const markAllAsRead = async (req, res) => {

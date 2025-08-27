@@ -53,6 +53,7 @@ exports.authenticate = async (req, res, next) => {
     if (!user) return res.status(401).json({ error: 'User not found.' });
 
     req.user = user; // Attach full user
+    console.log(user)
     next();
   } catch (err) {
     res.status(401).json({ error: 'Invalid token.' });

@@ -80,6 +80,7 @@ const signin = async (req, res) => {
       message: 'Login successful',
       accessToken,
       role: user.role,
+      id:user._id
     });
   } catch (error) {
     console.error('Signin error:', error.message);

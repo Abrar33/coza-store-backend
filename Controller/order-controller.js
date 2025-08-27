@@ -5,121 +5,123 @@ const User = require('../Models/user-model'); // Import the User model
 const { createNotification } = require('./notification-controller');
 
 const createOrder = async (req, res) => {
-  const buyerId = req.user.id;
-  const { items, customerInfo } = req.body;
+    const buyerId = req.user.id;
+    const { items, customerInfo } = req.body;
 
-  try {
-    let totalAmount = 0;
-    const productIdsForAdmin = [];
-    const orderItems = [];
+    try {
+        let totalAmount = 0;
+        const productIdsForAdmin = [];
+        const orderItems = [];
 
-    // Prepare items with seller info and calculate total
-    for (const item of items) {
-      const product = await Product.findById(item.product);
-      if (!product) return res.status(404).json({ error: `Product ${item.product} not found` });
+        // Prepare items with seller info and calculate total
+        for (const item of items) {
+            const product = await Product.findById(item.product);
+            if (!product) {
+                return res.status(404).json({ error: `Product ${item.product} not found` });
+            }
 
-      const inventory = await Inventory.findOne({ productId: item.product });
-      if (!inventory || inventory.quantityAvailable < item.quantity) {
-        return res.status(400).json({ error: `Insufficient stock for ${product.name}` });
-      }
+            const inventory = await Inventory.findOne({ productId: item.product });
+            if (!inventory || inventory.quantityAvailable < item.quantity) {
+                return res.status(400).json({ error: `Insufficient stock for ${product.name}` });
+            }
 
-      totalAmount += product.price * item.quantity;
-      productIdsForAdmin.push(product._id);
+            totalAmount += product.price * item.quantity;
+            productIdsForAdmin.push(product._id);
 
-      // Include seller in the order item
-      orderItems.push({
-        product: product._id,
-        quantity: item.quantity,
-        price: product.price,
-        seller: product.seller,
-      });
-    }
-
-    // Deduct inventory
-    for (const item of items) {
-      await Inventory.findOneAndUpdate(
-        { productId: item.product },
-        {
-          $inc: { quantityAvailable: -item.quantity },
-          $set: { lastRestockedDate: new Date() }
+            // Include seller in the order item
+            orderItems.push({
+                product: product._id,
+                quantity: item.quantity,
+                price: product.price,
+                seller: product.seller,
+            });
         }
-      );
-    }
 
-    // Create order
-    const order = new Order({
-      buyer: buyerId,
-      items: orderItems,
-      totalAmount,
-      status: 'confirmed',
-      paymentStatus: 'paid',
-      customerInfo
-    });
+        // Deduct inventory
+        for (const item of items) {
+            await Inventory.findOneAndUpdate(
+                { productId: item.product },
+                {
+                    $inc: { quantityAvailable: -item.quantity },
+                    $set: { lastRestockedDate: new Date() }
+                }
+            );
+        }
 
-    await order.save();
-
-    // Notify each seller
-    for (const item of orderItems) {
-      if (item.seller) {
-        const product = await Product.findById(item.product);
-        await createNotification({
-          title: 'New Order Placed',
-          message: `Your product "${product.name}" has been purchased!`,
-          type: 'orders', // ✅ Added notification type
-          senderId: buyerId,
-          recipientId: item.seller.toString(),
-          recipientRole: 'seller',
-          productId: product._id.toString(),
-          meta: { orderId: order._id.toString() }
+        // Create order
+        const order = new Order({
+            buyer: buyerId,
+            items: orderItems,
+            totalAmount,
+            status: 'confirmed',
+            paymentStatus: 'paid',
+            customerInfo
         });
-      }
+
+        await order.save();
+
+        // Notify each seller
+        for (const item of orderItems) {
+            if (item.seller) {
+                const product = await Product.findById(item.product);
+                await createNotification({
+                    title: 'New Order Placed',
+                    message: `Your product "${product.name}" has been purchased!`,
+                    type: 'orders',
+                    senderId: buyerId,
+                    recipientId: item.seller.toString(),
+                    recipientRole: 'seller',
+                    productId: product._id.toString(),
+                    meta: { orderId: order._id.toString() }
+                });
+            }
+        }
+
+        // Notify admin
+        const adminUser = await User.findOne({ role: 'admin' });
+        if (adminUser) {
+            const buyer = await User.findById(buyerId).select('name email');
+            const sellerDetails = await Promise.all(
+                [...new Set(orderItems.map(item => item.seller.toString()))].map(async sellerId => {
+                    const seller = await User.findById(sellerId).select('name email');
+                    return { sellerId, name: seller.name, email: seller.email };
+                })
+            );
+
+            // Corrected: productIdsForAdmin is now correctly passed in meta
+            await createNotification({
+                title: 'New Order Placed',
+                message: `Order #${order._id} placed by ${buyer.name}`,
+                type: 'orders',
+                senderId: buyerId,
+                recipientId: adminUser._id.toString(),
+                recipientRole: 'admin',
+                productId: null,
+                meta: {
+                    orderId: order._id.toString(),
+                    buyer: {
+                        id: buyerId,
+                        name: buyer.name,
+                        email: buyer.email,
+                    },
+                    sellers: sellerDetails,
+                    productIds: productIdsForAdmin.map(id => id.toString()),
+                },
+            });
+        }
+
+        // Return populated order with seller and buyer info
+        const populatedOrder = await Order.findById(order._id)
+            .populate('buyer', 'name email')
+            .populate('items.seller', 'name email')
+            .populate('items.product', 'name price');
+
+        res.status(201).json({ message: 'Order placed successfully', order: populatedOrder });
+
+    } catch (err) {
+        console.error('Create order error:', err);
+        res.status(500).json({ error: 'Order placement failed' });
     }
-
-    // Notify admin
-    // Notify admin
-const adminUser = await User.findOne({ role: 'admin' });
-if (adminUser) {
-  const buyer = await User.findById(buyerId).select('name email');
-  const sellerDetails = await Promise.all(
-    [...new Set(orderItems.map(item => item.seller.toString()))].map(async sellerId => {
-      const seller = await User.findById(sellerId).select('name email');
-      return { sellerId, name: seller.name, email: seller.email };
-    })
-  );
-
-  await createNotification({
-    title: 'New Order Placed',
-    message: `Order #${order._id} placed by ${buyer.name}`,
-    type: 'orders',
-    senderId: buyerId,
-    recipientId: adminUser._id.toString(),
-    recipientRole: 'admin',
-    productId: null,
-    meta: {
-      orderId: order._id.toString(),
-      buyer: {
-        id: buyerId,
-        name: buyer.name,
-        email: buyer.email,
-      },
-      sellers: sellerDetails,
-      productIds: productIdsForAdmin.map(id => id.toString()),
-    },
-  });
-}
-
-    // Return populated order with seller and buyer info
-    const populatedOrder = await Order.findById(order._id)
-      .populate('buyer', 'name email')
-      .populate('items.seller', 'name email')
-      .populate('items.product', 'name price');
-
-    res.status(201).json({ message: 'Order placed successfully', order: populatedOrder });
-
-  } catch (err) {
-    console.error('Create order error:', err);
-    res.status(500).json({ error: 'Order placement failed' });
-  }
 };
 
 
